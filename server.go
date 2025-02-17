@@ -102,13 +102,26 @@ func (s *Server) Serve(conn *net.UDPConn) error {
 	s.connMu.RLock()
 	defer s.connMu.RUnlock()
 	buf := make([]byte, 65536) // Largest possible TFTP datagram
+	offset := 0
 	for {
 		select {
 		case <-s.close:
 			return nil
 		default:
 			conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
-			n, addr, err := conn.ReadFromUDP(buf)
+			n, addr, err := conn.ReadFromUDP(buf[offset:])
+
+			// Check for fragmented WRQ/RRQ
+			if buf[1] == 1 || buf[1] == 2 {
+				if n == defaultHdrsize+defaultBlksize && buf[offset+n-1] != 0x0 {
+					s.log.debug("Fragmented request")
+					offset += n
+					continue
+				}
+
+				n += offset
+			}
+
 			if err != nil {
 				if err, ok := err.(*net.OpError); ok && err.Timeout() {
 					continue
@@ -139,13 +152,13 @@ func (s *Server) connManager() {
 		select {
 		case req := <-s.dispatchChan:
 			switch req.pkt[1] {
-			case 1: //RRQ
+			case 1: // RRQ
 				if s.singlePort {
 					reqChan = make(chan []byte, 64)
 					reqMap[req.addr.String()] = reqChan
 				}
 				go s.dispatchReadRequest(req, reqChan)
-			case 2: //WRQ
+			case 2: // WRQ
 				if s.singlePort {
 					reqChan = make(chan []byte, 64)
 					reqMap[req.addr.String()] = reqChan
